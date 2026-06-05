@@ -5,6 +5,7 @@ wandb logging, learning rate scheduling, and checkpointing.
 """
 
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -55,7 +56,8 @@ class Trainer:
         """Run the full training loop."""
         self.model.train()
 
-        # Initialize wandb
+        # Initialize wandb (graceful fallback if no API key)
+        use_wandb = False
         try:
             import wandb
             wandb.init(
@@ -68,12 +70,14 @@ class Trainer:
                 },
             )
             use_wandb = True
-        except Exception:
-            print("[Trainer] wandb not available, logging to stdout only")
-            use_wandb = False
+        except Exception as e:
+            print(f"[Trainer] wandb not available ({type(e).__name__}), logging to stdout only")
 
         data_iter = iter(self.dataloader)
         step_time = time.time()
+
+        # bf16 autocast context — saves VRAM and speeds up matmuls on Ampere+
+        amp_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
 
         while self.step < self.train_config.max_steps:
             accumulated_loss = 0.0
@@ -91,12 +95,13 @@ class Trainer:
                 input_ids = batch["input_ids"].to(self.device)
                 labels = batch["labels"].to(self.device)
 
-                # Forward pass
-                outputs = self.model(input_ids=input_ids, labels=labels)
-                loss = outputs["loss"] / self.train_config.grad_accum_steps
-                aux_loss = outputs.get("aux_loss", torch.tensor(0.0))
+                # Forward pass (with bf16 autocast if enabled)
+                with amp_ctx if self.train_config.use_bf16 else nullcontext():
+                    outputs = self.model(input_ids=input_ids, labels=labels)
+                    loss = outputs["loss"] / self.train_config.grad_accum_steps
+                    aux_loss = outputs.get("aux_loss", torch.tensor(0.0))
 
-                # Backward pass
+                # Backward pass (outside autocast for stable fp32 gradients)
                 loss.backward()
 
                 accumulated_loss += loss.item()

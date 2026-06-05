@@ -149,11 +149,73 @@ def validate():
 @app.function(
     gpu="A10G",
     image=image,
+    timeout=1800,  # 30 min — enough for 100 training steps
+)
+def smoke_train():
+    """Quick 100-step training smoke test to verify the full pipeline works."""
+    import sys
+    import torch
+    import dataclasses
+
+    sys.path.insert(0, "/root/aero-deuce")
+
+    from configs.smoke_test import smoke_test_model_config, smoke_test_train_config, smoke_test_data_config
+    from aero_deuce.model.transformer import AeroDeuceForCausalLM
+    from aero_deuce.training.trainer import Trainer
+
+    # Configs — override max_steps to 100 for quick validation
+    model_config = smoke_test_model_config()
+    train_config = dataclasses.replace(
+        smoke_test_train_config(),
+        max_steps=100,
+        warmup_steps=10,
+        log_interval=1,
+        checkpoint_interval=100,  # only save at end
+    )
+    data_config = smoke_test_data_config()
+
+    device = torch.device("cuda")
+    print(f"[SmokeTrain] GPU: {torch.cuda.get_device_name(0)}")
+    print(f"[SmokeTrain] VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+
+    # Build model
+    model = AeroDeuceForCausalLM(model_config).to(device)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"[SmokeTrain] Total parameters: {total_params:,} ({total_params / 1e6:.1f}M)")
+
+    # Print memory after model load
+    torch.cuda.reset_peak_memory_stats()
+    alloc = torch.cuda.memory_allocated() / 1e9
+    print(f"[SmokeTrain] GPU mem after model load: {alloc:.2f} GB")
+
+    # Create trainer
+    trainer = Trainer(
+        model_config=model_config,
+        train_config=train_config,
+        data_config=data_config,
+        model=model,
+        device=device,
+    )
+
+    print(f"\n[SmokeTrain] Running {train_config.max_steps} steps to validate training loop...")
+    print(f"[SmokeTrain] Seq={train_config.max_seq_len}, Batch={train_config.batch_size}, "
+          f"Micro={train_config.micro_batch_size}, GradAccum={train_config.grad_accum_steps}")
+    print()
+
+    trainer.train()
+
+    peak_mem = torch.cuda.max_memory_allocated() / 1e9
+    print(f"\n[SmokeTrain] ✓ Done! Step={trainer.step}, Peak GPU={peak_mem:.2f} GB")
+
+
+@app.function(
+    gpu="A10G",
+    image=image,
     timeout=86400,  # 24 hours
     volumes={"/checkpoints": volume},
 )
 def train():
-    """Run the full 115M parameter smoke test training on TinyStories."""
+    """Run the full 10K step smoke test training on TinyStories."""
     import sys
     import torch
 
@@ -202,14 +264,23 @@ def train():
 
 
 @app.local_entrypoint()
-def main(train: bool = False):
-    """Entry point. Defaults to validation; pass --train for full training."""
+def main(train: bool = False, smoke: bool = False):
+    """Entry point.
+
+    Defaults to validation. Use --smoke for 100-step training, --train for full 10K.
+    """
     if train:
         print("=" * 60)
-        print("  Aero-Deuce FULL SMOKE TEST")
-        print("  115M params · TinyStories · A10G")
+        print("  Aero-Deuce FULL TRAINING (10K steps)")
+        print("  372M params · TinyStories · A10G")
         print("=" * 60)
         train.remote()
+    elif smoke:
+        print("=" * 60)
+        print("  Aero-Deuce SMOKE TRAINING (100 steps)")
+        print("  372M params · TinyStories · A10G")
+        print("=" * 60)
+        smoke_train.remote()
     else:
         print("=" * 60)
         print("  Aero-Deuce VALIDATION")
