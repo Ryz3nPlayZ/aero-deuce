@@ -60,10 +60,21 @@ class AeroDeuceForCausalLM(nn.Module):
         self.apply(self._init_weights)
 
     def get_lm_head(self) -> nn.Module:
-        """Get the LM head module (tied embedding or separate linear)."""
+        """Get the LM head module (separate linear only)."""
         if self.lm_head is None:
-            return self.embed_tokens
+            raise RuntimeError("Use lm_head_forward() for tied embeddings")
         return self.lm_head
+
+    def lm_head_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Project hidden states to logits, handling tied embeddings correctly.
+
+        When embeddings are tied, we must use F.linear with the (transposed) embedding
+        weight — NOT nn.Embedding.forward() which expects integer indices.
+        """
+        if self.lm_head is not None:
+            return self.lm_head(x)
+        # Tied: use embedding weight as a linear projection (weight is vocab×d, linear needs d×vocab)
+        return torch.nn.functional.linear(x, self.embed_tokens.weight)
 
     def forward(
         self,
@@ -108,7 +119,7 @@ class AeroDeuceForCausalLM(nn.Module):
         x = self.norm(x)
 
         # LM head (tied with embeddings)
-        logits = self.get_lm_head()(x)  # (B, L, vocab_size)
+        logits = self.lm_head_forward(x)  # (B, L, vocab_size)
 
         # Compute loss
         loss = None

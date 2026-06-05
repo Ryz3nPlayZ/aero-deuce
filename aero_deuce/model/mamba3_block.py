@@ -38,7 +38,7 @@ class Mamba3Block(nn.Module):
             d_state=config.ssm_d_state,
             expand=config.ssm_expand,
             headdim=config.ssm_headdim,
-            is_mimo=True,  # Multi-Input Multi-Output for richer state tracking
+            is_mimo=False,  # SISO mode — MIMO requires >800KB shared mem (exceeds A10G limit)
         )
 
     def forward(
