@@ -1,0 +1,8 @@
+torch>=2.4.0
+mamba-ssm>=2.2.0
+causal-conv1d>=1.4.0
+transformers>=4.40.0
+datasets>=2.18.0
+wandb>=0.17.0
+modal>=0.64.0
+numpy>=1.24.0
