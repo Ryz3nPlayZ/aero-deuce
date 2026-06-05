@@ -69,6 +69,7 @@ image = (
         "transformers>=4.40.0,<5.0.0",
         "datasets>=2.18.0",
         "numpy>=1.24.0",
+        "wandb>=0.17.0",
     )
     .add_local_dir(
         local_path=".",
@@ -213,6 +214,7 @@ def smoke_train():
     image=image,
     timeout=86400,  # 24 hours
     volumes={"/checkpoints": volume},
+    secrets=[modal.Secret.from_name("aero-deuce-wandb")],
 )
 def train():
     """Run the full 10K step smoke test training on TinyStories."""
@@ -221,7 +223,10 @@ def train():
 
     sys.path.insert(0, "/root/aero-deuce")
 
-    from configs.smoke_test import smoke_test_model_config, smoke_test_train_config, smoke_test_data_config
+    from configs.smoke_test import (
+        smoke_test_model_config, smoke_test_train_config,
+        smoke_test_data_config, smoke_test_eval_config,
+    )
     from aero_deuce.model.transformer import AeroDeuceForCausalLM
     from aero_deuce.training.trainer import Trainer
 
@@ -229,6 +234,7 @@ def train():
     model_config = smoke_test_model_config()
     train_config = smoke_test_train_config()
     data_config = smoke_test_data_config()
+    eval_config = smoke_test_eval_config()
 
     # Device
     device = torch.device("cuda")
@@ -240,19 +246,24 @@ def train():
     total_params = sum(p.numel() for p in model.parameters())
     print(f"[Train] Total parameters: {total_params:,} ({total_params / 1e6:.1f}M)")
 
-    # Create trainer
+    # Create trainer with eval hook
     trainer = Trainer(
         model_config=model_config,
         train_config=train_config,
         data_config=data_config,
         model=model,
         device=device,
+        eval_config=eval_config,
+        eval_batches=10,
     )
 
     print(f"\n[Train] Starting training for {train_config.max_steps} steps")
     print(f"[Train] Seq length: {train_config.max_seq_len}, "
-          f"Batch: {train_config.batch_size} (micro: {train_config.micro_batch_size})")
+          f"Batch: {train_config.batch_size} (micro: {train_config.micro_batch_size}, "
+          f"grad_accum: {train_config.grad_accum_steps})")
+    print(f"[Train] Tokens/step: {train_config.batch_size * train_config.max_seq_len:,}")
     print(f"[Train] LR: {train_config.learning_rate}, Warmup: {train_config.warmup_steps}")
+    print(f"[Train] Eval every {train_config.eval_interval} steps")
     print()
 
     trainer.train()
@@ -264,12 +275,12 @@ def train():
 
 
 @app.local_entrypoint()
-def main(train: bool = False, smoke: bool = False):
+def main(run_train: bool = False, smoke: bool = False):
     """Entry point.
 
-    Defaults to validation. Use --smoke for 100-step training, --train for full 10K.
+    Defaults to validation. Use --smoke for 100-step training, --run-train for full 10K.
     """
-    if train:
+    if run_train:
         print("=" * 60)
         print("  Aero-Deuce FULL TRAINING (10K steps)")
         print("  372M params · TinyStories · A10G")

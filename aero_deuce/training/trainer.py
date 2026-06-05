@@ -1,7 +1,7 @@
 """Training loop for Aero-Deuce.
 
 Handles gradient accumulation, dual optimizer stepping, gradient clipping,
-wandb logging, learning rate scheduling, and checkpointing.
+wandb logging, learning rate scheduling, periodic evaluation, and checkpointing.
 """
 
 import time
@@ -24,6 +24,7 @@ class Trainer:
     - Dual optimizer (Muon + AdamW) stepping
     - Warmup + cosine decay LR schedule applied to both optimizers
     - Gradient clipping by global norm
+    - Periodic evaluation on a validation split
     - wandb logging for loss, LR, grad norm, throughput
     - Periodic checkpointing to disk (or Modal Volume)
     """
@@ -35,10 +36,14 @@ class Trainer:
         data_config: DataConfig,
         model: torch.nn.Module,
         device: torch.device,
+        eval_config: DataConfig | None = None,
+        eval_batches: int = 10,
     ):
         self.model_config = model_config
         self.train_config = train_config
         self.data_config = data_config
+        self.eval_config = eval_config
+        self.eval_batches = eval_batches
         self.model = model
         self.device = device
 
@@ -47,6 +52,11 @@ class Trainer:
 
         # Create data loader
         self.dataloader = create_dataloader(data_config, batch_size=train_config.micro_batch_size)
+
+        # Create eval data loader if eval config provided
+        self.eval_dataloader = None
+        if eval_config is not None:
+            self.eval_dataloader = create_dataloader(eval_config, batch_size=train_config.micro_batch_size)
 
         # Training state
         self.step = 0
@@ -178,6 +188,27 @@ class Trainer:
                     f"{step_time_ms:.0f} ms/step"
                 )
 
+            # Evaluation
+            if (
+                self.train_config.eval_interval > 0
+                and self.step % self.train_config.eval_interval == 0
+            ):
+                val_loss, val_aux = self.evaluate()
+                print(
+                    f"  └─ Eval @ step {self.step}: "
+                    f"val_loss={val_loss:.4f}, val_aux={val_aux:.4f}, "
+                    f"train_val_gap={accumulated_loss - val_loss:+.4f}"
+                )
+
+                if use_wandb:
+                    import wandb
+                    wandb.log({
+                        "eval/loss": val_loss,
+                        "eval/aux_loss": val_aux,
+                        "eval/train_val_gap": accumulated_loss - val_loss,
+                        "eval/step": self.step,
+                    }, step=self.step)
+
             # Checkpointing
             if self.step % self.train_config.checkpoint_interval == 0:
                 self.save_checkpoint()
@@ -187,6 +218,53 @@ class Trainer:
         if use_wandb:
             import wandb
             wandb.finish()
+
+    def evaluate(self) -> tuple[float, float]:
+        """Run evaluation on the validation split.
+
+        Runs self.eval_batches forward passes in no_grad mode and returns
+        the average loss and aux loss.
+
+        Returns:
+            Tuple of (average_val_loss, average_val_aux_loss).
+        """
+        if self.eval_dataloader is None:
+            print("[Eval] No eval dataloader configured, skipping evaluation")
+            return 0.0, 0.0
+
+        self.model.eval()
+        eval_iter = iter(self.eval_dataloader)
+        total_loss = 0.0
+        total_aux_loss = 0.0
+        n_batches = 0
+
+        amp_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
+
+        with torch.no_grad():
+            for _ in range(self.eval_batches):
+                try:
+                    batch = next(eval_iter)
+                except StopIteration:
+                    eval_iter = iter(self.eval_dataloader)
+                    batch = next(eval_iter)
+
+                input_ids = batch["input_ids"].to(self.device)
+                labels = batch["labels"].to(self.device)
+
+                with amp_ctx if self.train_config.use_bf16 else nullcontext():
+                    outputs = self.model(input_ids=input_ids, labels=labels)
+
+                total_loss += outputs["loss"].item()
+                aux = outputs.get("aux_loss")
+                if aux is not None:
+                    total_aux_loss += aux.item()
+                n_batches += 1
+
+        self.model.train()
+
+        avg_loss = total_loss / max(n_batches, 1)
+        avg_aux = total_aux_loss / max(n_batches, 1)
+        return avg_loss, avg_aux
 
     def save_checkpoint(self) -> None:
         """Save training checkpoint.

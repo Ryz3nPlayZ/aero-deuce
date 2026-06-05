@@ -52,7 +52,7 @@ def smoke_test_model_config() -> ModelConfig:
 def smoke_test_train_config() -> TrainConfig:
     """Training configuration for smoke test on A10G (24GB VRAM)."""
     return TrainConfig(
-        batch_size=4,
+        batch_size=32,  # 32 micro-batches × 4096 tokens = 131,072 tokens/step
         micro_batch_size=1,
         max_seq_len=4_096,
         max_steps=10_000,
@@ -67,7 +67,7 @@ def smoke_test_train_config() -> TrainConfig:
         adam_eps=1e-8,
         use_bf16=True,
         log_interval=10,
-        eval_interval=1_000,
+        eval_interval=500,
         checkpoint_interval=2_000,
         wandb_project="aero-deuce",
         wandb_run_name="smoke-test-115M",
@@ -86,6 +86,23 @@ def smoke_test_data_config() -> DataConfig:
         streaming=True,
         pack_sequences=True,
         buffer_size=10_000,
+        max_seq_len=4_096,
+        num_workers=0,
+        pin_memory=True,
+    )
+
+
+def smoke_test_eval_config() -> DataConfig:
+    """Data configuration for TinyStories validation split."""
+    return DataConfig(
+        dataset_name="roneneldan/TinyStories",
+        dataset_split="validation",
+        dataset_text_field="text",
+        tokenizer_name="Qwen/Qwen3-1.7B",
+        eos_token_id=151645,
+        streaming=True,
+        pack_sequences=True,
+        buffer_size=1_000,
         max_seq_len=4_096,
         num_workers=0,
         pin_memory=True,
