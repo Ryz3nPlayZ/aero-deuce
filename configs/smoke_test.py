@@ -59,7 +59,7 @@ def smoke_test_train_config() -> TrainConfig:
         learning_rate=3e-4,
         weight_decay=0.1,
         warmup_steps=500,
-        grad_clip_norm=1.0,
+        grad_clip_norm=5.0,
         muon_momentum=0.95,
         muon_ns_steps=5,
         muon_lr_scale=0.02,
