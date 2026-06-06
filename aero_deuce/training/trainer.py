@@ -1,7 +1,11 @@
-"""Training loop for Aero-Deuce.
+"""SFT Training loop for Aero-Deuce QLoRA post-training.
 
-Handles gradient accumulation, dual optimizer stepping, gradient clipping,
-wandb logging, learning rate scheduling, periodic evaluation, and checkpointing.
+Handles gradient accumulation, dual optimizer stepping (Muon + AdamW),
+gradient clipping, wandb logging, learning rate scheduling, periodic evaluation,
+and LoRA adapter checkpointing.
+
+Adapted from the pretraining trainer to work with HuggingFace model API
+(outputs.loss instead of custom dict) and save LoRA adapter weights only.
 """
 
 import time
@@ -10,53 +14,48 @@ from pathlib import Path
 
 import torch
 
-from configs.base import ModelConfig, TrainConfig, DataConfig
-from aero_deuce.data.dataset import create_dataloader
+from configs.base import TrainConfig, DataConfig
 from aero_deuce.optim.dual_optim import create_dual_optimizer
 from aero_deuce.training.schedule import get_lr
 
 
 class Trainer:
-    """Orchestrates the Aero-Deuce training loop.
+    """Orchestrates the QLoRA SFT training loop on Gemma 4 12B IT.
 
     Supports:
     - Gradient accumulation across micro-batches
-    - Dual optimizer (Muon + AdamW) stepping
+    - Dual optimizer (Muon for LoRA A/B, AdamW for non-2D params)
     - Warmup + cosine decay LR schedule applied to both optimizers
     - Gradient clipping by global norm
-    - Periodic evaluation on a validation split
+    - Periodic evaluation on held-out data
     - wandb logging for loss, LR, grad norm, throughput
-    - Periodic checkpointing to disk (or Modal Volume)
+    - LoRA adapter-only checkpointing (much smaller than full model saves)
     """
 
     def __init__(
         self,
-        model_config: ModelConfig,
+        model: torch.nn.Module,
+        tokenizer,
         train_config: TrainConfig,
         data_config: DataConfig,
-        model: torch.nn.Module,
         device: torch.device,
-        eval_config: DataConfig | None = None,
-        eval_batches: int = 10,
+        train_dataloader=None,
+        eval_dataloader=None,
+        eval_batches: int = 20,
     ):
-        self.model_config = model_config
+        self.model = model
+        self.tokenizer = tokenizer
         self.train_config = train_config
         self.data_config = data_config
-        self.eval_config = eval_config
-        self.eval_batches = eval_batches
-        self.model = model
         self.device = device
+        self.eval_dataloader = eval_dataloader
+        self.eval_batches = eval_batches
 
-        # Create dual optimizer
+        # Create dual optimizer (Muon + AdamW)
         self.optimizers, self.param_groups = create_dual_optimizer(model, train_config)
 
-        # Create data loader
-        self.dataloader = create_dataloader(data_config, batch_size=train_config.micro_batch_size)
-
-        # Create eval data loader if eval config provided
-        self.eval_dataloader = None
-        if eval_config is not None:
-            self.eval_dataloader = create_dataloader(eval_config, batch_size=train_config.micro_batch_size)
+        # Use provided dataloader or create one
+        self.dataloader = train_dataloader
 
         # Training state
         self.step = 0
@@ -64,6 +63,9 @@ class Trainer:
 
     def train(self) -> None:
         """Run the full training loop."""
+        if self.dataloader is None:
+            raise ValueError("No train dataloader provided. Pass train_dataloader to constructor.")
+
         self.model.train()
 
         # Initialize wandb (graceful fallback if no API key)
@@ -74,7 +76,6 @@ class Trainer:
                 project=self.train_config.wandb_project,
                 name=self.train_config.wandb_run_name,
                 config={
-                    "model": vars(self.model_config),
                     "train": vars(self.train_config),
                     "data": vars(self.data_config),
                 },
@@ -86,12 +87,11 @@ class Trainer:
         data_iter = iter(self.dataloader)
         step_time = time.time()
 
-        # bf16 autocast context — saves VRAM and speeds up matmuls on Ampere+
+        # bf16 autocast context
         amp_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
 
         while self.step < self.train_config.max_steps:
             accumulated_loss = 0.0
-            accumulated_aux_loss = 0.0
 
             for _ in range(self.train_config.grad_accum_steps):
                 # Get next batch (recreate iterator if exhausted)
@@ -104,19 +104,20 @@ class Trainer:
                 # Move to device
                 input_ids = batch["input_ids"].to(self.device)
                 labels = batch["labels"].to(self.device)
+                attention_mask = batch["attention_mask"].to(self.device)
 
-                # Forward pass (with bf16 autocast if enabled)
+                # Forward pass (with bf16 autocast)
                 with amp_ctx if self.train_config.use_bf16 else nullcontext():
-                    outputs = self.model(input_ids=input_ids, labels=labels)
-                    loss = outputs["loss"] / self.train_config.grad_accum_steps
-                    aux_loss = outputs.get("aux_loss", torch.tensor(0.0))
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                    )
+                    loss = outputs.loss / self.train_config.grad_accum_steps
 
-                # Backward pass (outside autocast for stable fp32 gradients)
+                # Backward pass
                 loss.backward()
-
                 accumulated_loss += loss.item()
-                if aux_loss is not None:
-                    accumulated_aux_loss += aux_loss.item()
 
             # Gradient clipping
             grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -133,11 +134,13 @@ class Trainer:
             )
             muon_lr = lr * self.train_config.muon_lr_scale
 
-            # Apply LR to both optimizer groups
-            for group in self.optimizers[0].param_groups:
-                group["lr"] = muon_lr
-            for group in self.optimizers[1].param_groups:
-                group["lr"] = lr
+            # Apply LR to optimizers based on which ones exist
+            # optimizers[0] = Muon (lr scaled), optimizers[1] = AdamW (base lr)
+            # But we can't rely on ordering — use param_groups to identify
+            for opt_idx, opt in enumerate(self.optimizers):
+                target_lr = muon_lr if opt_idx == 0 else lr
+                for group in opt.param_groups:
+                    group["lr"] = target_lr
 
             # Step both optimizers
             for opt in self.optimizers:
@@ -164,7 +167,6 @@ class Trainer:
             if self.step % self.train_config.log_interval == 0:
                 log_data = {
                     "train/loss": accumulated_loss,
-                    "train/aux_loss": accumulated_aux_loss,
                     "train/lr": lr,
                     "train/muon_lr": muon_lr,
                     "train/grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm,
@@ -181,7 +183,6 @@ class Trainer:
                 print(
                     f"Step {self.step:>6d} | "
                     f"Loss {accumulated_loss:.4f} | "
-                    f"AuxLoss {accumulated_aux_loss:.4f} | "
                     f"LR {lr:.2e} | "
                     f"GradNorm {grad_norm:.4f} | "
                     f"{tokens_per_sec:.0f} tok/s | "
@@ -193,10 +194,10 @@ class Trainer:
                 self.train_config.eval_interval > 0
                 and self.step % self.train_config.eval_interval == 0
             ):
-                val_loss, val_aux = self.evaluate()
+                val_loss = self.evaluate()
                 print(
                     f"  └─ Eval @ step {self.step}: "
-                    f"val_loss={val_loss:.4f}, val_aux={val_aux:.4f}, "
+                    f"val_loss={val_loss:.4f}, "
                     f"train_val_gap={accumulated_loss - val_loss:+.4f}"
                 )
 
@@ -204,7 +205,6 @@ class Trainer:
                     import wandb
                     wandb.log({
                         "eval/loss": val_loss,
-                        "eval/aux_loss": val_aux,
                         "eval/train_val_gap": accumulated_loss - val_loss,
                         "eval/step": self.step,
                     }, step=self.step)
@@ -219,23 +219,22 @@ class Trainer:
             import wandb
             wandb.finish()
 
-    def evaluate(self) -> tuple[float, float]:
-        """Run evaluation on the validation split.
+    def evaluate(self) -> float:
+        """Run evaluation on the held-out split.
 
         Runs self.eval_batches forward passes in no_grad mode and returns
-        the average loss and aux loss.
+        the average loss.
 
         Returns:
-            Tuple of (average_val_loss, average_val_aux_loss).
+            Average validation loss.
         """
         if self.eval_dataloader is None:
             print("[Eval] No eval dataloader configured, skipping evaluation")
-            return 0.0, 0.0
+            return 0.0
 
         self.model.eval()
         eval_iter = iter(self.eval_dataloader)
         total_loss = 0.0
-        total_aux_loss = 0.0
         n_batches = 0
 
         amp_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -250,55 +249,41 @@ class Trainer:
 
                 input_ids = batch["input_ids"].to(self.device)
                 labels = batch["labels"].to(self.device)
+                attention_mask = batch["attention_mask"].to(self.device)
 
                 with amp_ctx if self.train_config.use_bf16 else nullcontext():
-                    outputs = self.model(input_ids=input_ids, labels=labels)
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                    )
 
-                total_loss += outputs["loss"].item()
-                aux = outputs.get("aux_loss")
-                if aux is not None:
-                    total_aux_loss += aux.item()
+                total_loss += outputs.loss.item()
                 n_batches += 1
 
         self.model.train()
 
         avg_loss = total_loss / max(n_batches, 1)
-        avg_aux = total_aux_loss / max(n_batches, 1)
-        return avg_loss, avg_aux
+        return avg_loss
 
     def save_checkpoint(self) -> None:
-        """Save training checkpoint.
+        """Save LoRA adapter checkpoint.
 
-        Saves model state dict, optimizer states, and training step.
-        Compatible with Modal Volumes and local filesystem.
+        Saves only the LoRA adapter weights (not the full 12B base model)
+        plus optimizer states and training step. This is much more efficient
+        than saving the full model.
         """
-        checkpoint_dir = Path(self.train_config.checkpoint_dir)
+        checkpoint_dir = Path(self.train_config.checkpoint_dir) / f"step_{self.step}"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        checkpoint_path = checkpoint_dir / f"checkpoint_step_{self.step}.pt"
+        # Save LoRA adapter weights via PEFT's save_pretrained
+        self.model.save_pretrained(str(checkpoint_dir))
 
-        checkpoint = {
+        # Save optimizer states and step counter separately
+        torch.save({
             "step": self.step,
-            "model_state_dict": self.model.state_dict(),
             "optimizers": [opt.state_dict() for opt in self.optimizers],
-            "model_config": vars(self.model_config),
             "train_config": vars(self.train_config),
-        }
+        }, checkpoint_dir / "training_state.pt")
 
-        torch.save(checkpoint, checkpoint_path)
-        print(f"[Checkpoint] Saved to {checkpoint_path}")
-
-    def load_checkpoint(self, checkpoint_path: str) -> None:
-        """Load training checkpoint and restore state.
-
-        Args:
-            checkpoint_path: Path to the checkpoint file.
-        """
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-
-        self.model.load_state_dict(checkpoint["model_state_dict"])
-        for opt, opt_state in zip(self.optimizers, checkpoint["optimizers"]):
-            opt.load_state_dict(opt_state)
-        self.step = checkpoint["step"]
-
-        print(f"[Checkpoint] Restored from {checkpoint_path} at step {self.step}")
+        print(f"[Checkpoint] Saved LoRA adapter to {checkpoint_dir}")

@@ -1,12 +1,13 @@
-"""Dual optimizer setup — Muon for 2D weights + AdamW for everything else.
+"""Dual optimizer setup — Muon for LoRA matrices + AdamW for remaining params.
 
-Partitions model parameters into two groups based on the Aero-Deuce spec:
-- Group A (Muon): Internal Mamba-3 projections, Attention QKV operators,
-  FFN/Expert weight matrices — all 2D weight matrices.
-- Group B (AdamW): Embedding tables, all RMSNorm scales, and MoE router logits.
+Partitions trainable LoRA parameters into two groups:
+- Group A (Muon): LoRA A and B weight matrices (lora_A.weight, lora_B.weight).
+  These are 2D matrices — exactly what Muon's Newton-Schulz orthogonalization
+  was designed for. Accelerates convergence on low-rank adapter weights.
+- Group B (AdamW): Non-2D trainable params (LoRA scaling vectors, embedding
+  adapters if present, any 1D parameters).
 
-The router gate is explicitly excluded from Muon because orthogonalizing
-router logits disrupts the load-balance signal and can cause expert collapse.
+Base model weights are frozen (4-bit quantized) and never appear in either group.
 """
 
 import torch
@@ -20,10 +21,10 @@ def create_dual_optimizer(
     model: torch.nn.Module,
     train_config: TrainConfig,
 ) -> tuple[list[torch.optim.Optimizer], dict[str, list[str]]]:
-    """Create the dual Muon + AdamW optimizer setup.
+    """Create the dual Muon + AdamW optimizer setup for LoRA parameters.
 
     Args:
-        model: The AeroDeuceForCausalLM model.
+        model: The PEFT-wrapped model with LoRA adapters injected.
         train_config: Training configuration.
 
     Returns:
@@ -37,13 +38,16 @@ def create_dual_optimizer(
     adamw_names = []
 
     # Keywords that exclude a parameter from Muon (even if 2D)
-    adamw_keywords = {"embed", "norm", "router", "gate"}
+    # - norm: RMSNorm/LayerNorm scales (1D or 2D but shouldn't be orthogonalized)
+    # - embed: embedding tables (if somehow trainable)
+    # - lora_embedding: LoRA embedding adapters (different structure than A/B matrices)
+    adamw_keywords = {"norm", "embed", "lora_embedding"}
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
 
-        # Decision logic: 2D weight matrix that isn't in the AdamW exclusion list
+        # Muon targets: 2D LoRA weight matrices (lora_A.weight, lora_B.weight)
         is_muon = (
             param.ndim >= 2
             and not any(kw in name for kw in adamw_keywords)
@@ -56,24 +60,40 @@ def create_dual_optimizer(
             adamw_params.append(param)
             adamw_names.append(name)
 
-    # Create Muon optimizer for 2D weight matrices
-    optimizer_muon = Muon(
-        muon_params,
-        lr=train_config.learning_rate * train_config.muon_lr_scale,
-        momentum=train_config.muon_momentum,
-        ns_steps=train_config.muon_ns_steps,
-    )
+    print(f"[DualOptim] Muon params: {len(muon_params)} tensors")
+    print(f"[DualOptim] AdamW params: {len(adamw_params)} tensors")
 
-    # Create AdamW optimizer for embeddings, norms, router
-    optimizer_adamw = AdamW(
-        adamw_params,
-        lr=train_config.learning_rate,
-        weight_decay=train_config.weight_decay,
-        betas=train_config.adam_betas,
-        eps=train_config.adam_eps,
-    )
+    if muon_params:
+        total_muon = sum(p.numel() for p in muon_params)
+        print(f"[DualOptim] Muon total: {total_muon:,} parameters")
+    if adamw_params:
+        total_adamw = sum(p.numel() for p in adamw_params)
+        print(f"[DualOptim] AdamW total: {total_adamw:,} parameters")
 
-    optimizers = [optimizer_muon, optimizer_adamw]
+    optimizers = []
+
+    # Create Muon optimizer for 2D LoRA weight matrices
+    if muon_params:
+        optimizer_muon = Muon(
+            muon_params,
+            lr=train_config.learning_rate * train_config.muon_lr_scale,
+            momentum=train_config.muon_momentum,
+            ns_steps=train_config.muon_ns_steps,
+        )
+        optimizers.append(optimizer_muon)
+
+    # Create AdamW optimizer for non-2D trainable params
+    # (may be empty if all trainable params are 2D LoRA matrices)
+    if adamw_params:
+        optimizer_adamw = AdamW(
+            adamw_params,
+            lr=train_config.learning_rate,
+            weight_decay=train_config.weight_decay,
+            betas=train_config.adam_betas,
+            eps=train_config.adam_eps,
+        )
+        optimizers.append(optimizer_adamw)
+
     param_groups = {
         "muon": muon_names,
         "adamw": adamw_names,

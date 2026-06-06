@@ -1,105 +1,77 @@
 """Aero-Deuce configuration dataclasses.
 
-Three frozen dataclasses that fully parameterize the model, training, and data pipeline.
-These are the single source of truth — every module imports from here.
+Three frozen dataclasses that fully parameterize the QLoRA post-training pipeline
+on Gemma 4 12B IT. These are the single source of truth — every module imports from here.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Tuple
 
 
 @dataclass(frozen=True)
-class ModelConfig:
-    """Architecture hyperparameters for Aero-Deuce."""
+class QLoRAConfig:
+    """QLoRA adapter configuration for Gemma 4 12B IT.
 
-    # Core dimensions
-    d_model: int = 2048
-    n_layers: int = 36
-    vocab_size: int = 151_936  # Qwen3 tokenizer
-    tie_embeddings: bool = True
-    use_bias: bool = False
+    Controls model loading (4-bit NF4 quantization) and LoRA adapter injection.
+    Uses Unsloth's FastLanguageModel for fused Triton kernels.
+    """
 
-    # Mamba-3 SSM parameters
-    ssm_d_state: int = 128
-    ssm_expand: int = 2
-    ssm_headdim: int = 64
+    # Base model — IT variant has instruction following + thinking mode baked in
+    base_model: str = "google/gemma-4-12b-it"
 
-    # Grouped-Query Attention parameters
-    n_q_heads: int = 16
-    n_kv_heads: int = 8
-    attn_theta: float = 1_000_000.0  # RoPE base frequency
-    max_seq_len: int = 32_768
+    # Sequence length (truncation/padding target)
+    max_seq_length: int = 2048
 
-    # Layer type assignments (0-indexed)
-    attn_layer_indices: Tuple[int, ...] = (9, 21, 33)
-    dense_ffn_layers: Tuple[int, ...] = (0, 1, 2)
+    # 4-bit quantization
+    load_in_4bit: bool = True
+    bnb_4bit_quant_type: str = "nf4"          # NormalFloat4
+    bnb_4bit_use_double_quant: bool = True     # Nested quantization for further compression
+    bnb_4bit_compute_dtype: str = "bfloat16"   # Compute dtype for dequantized weights
 
-    # DeepSeekMoE parameters
-    n_experts: int = 64
-    n_shared_experts: int = 1
-    top_k: int = 6
-    expert_hidden_dim: int = 0  # 0 = auto-compute (4 * d_model * 7 / (64 * n_shared_experts))
-    router_aux_loss_alpha: float = 0.01
-    router_init_std: float = 1e-3
+    # LoRA hyperparameters
+    lora_r: int = 16                           # Rank
+    lora_alpha: int = 32                       # Scaling factor (alpha/r = 2.0)
+    lora_dropout: float = 0.0                  # No dropout — dataset is small, want full signal
+    target_modules: Tuple[str, ...] = (
+        "q_proj", "k_proj", "v_proj", "o_proj",
+        "gate_proj", "up_proj", "down_proj",
+    )
+    # Gradient checkpointing to save VRAM
+    use_gradient_checkpointing: bool = True
 
-    # RMSNorm epsilon
-    rms_norm_eps: float = 1e-6
-
-    # Weight initialization
-    init_std: float = 0.02
-
-    @property
-    def head_dim(self) -> int:
-        return self.d_model // self.n_q_heads
-
-    @property
-    def computed_expert_hidden_dim(self) -> int:
-        """Compute per-expert hidden dimension following DeepSeekMoE fine-grained segmentation.
-
-        The standard SwiGLU FFN has hidden_dim = 4 * d_model.
-        With N routed experts, each expert gets a fraction to keep total FLOPs comparable.
-        We use 7/64 of the standard hidden dim per expert (matching DeepSeek-MoE proportions).
-        """
-        if self.expert_hidden_dim > 0:
-            return self.expert_hidden_dim
-        # Standard FFN hidden, then scale for fine-grained experts
-        standard_hidden = 4 * self.d_model
-        # DeepSeek proportion: each expert is ~7/64 of standard, rounded to nearest 64 for alignment
-        per_expert = max(64, (standard_hidden * 7 // (64 * self.n_shared_experts) // 64) * 64)
-        return per_expert
-
-    @property
-    def ffn_hidden_dim(self) -> int:
-        """Standard (dense) FFN hidden dimension."""
-        return 4 * self.d_model
+    # dtype for model loading — None = auto-detect (bf16 on Ampere+, fp16 otherwise)
+    dtype: str = None
 
 
 @dataclass(frozen=True)
 class TrainConfig:
-    """Training hyperparameters."""
+    """Training hyperparameters for QLoRA SFT.
+
+    Tuned for ~30K sample dataset on a single A10G (24GB VRAM).
+    ~3000 steps at batch_size=4, grad_accum=4 → ~48K gradient updates total.
+    """
 
     # Batch configuration
-    batch_size: int = 4  # Global batch size (per optimizer step)
-    micro_batch_size: int = 1  # Per-forward-pass micro batch (gradient accumulation)
+    batch_size: int = 4                        # Global batch size (per optimizer step)
+    micro_batch_size: int = 1                  # Per-forward-pass (gradient accumulation)
 
-    # Sequence length (overrides ModelConfig.max_seq_len for data pipeline)
-    max_seq_len: int = 4_096
+    max_seq_len: int = 2048
 
     # Optimization
-    max_steps: int = 100_000
-    learning_rate: float = 3e-4
-    weight_decay: float = 0.1
-    warmup_steps: int = 2_000
+    max_steps: int = 1_500       # Reduced: 30K samples / (4 batch × ~4 accum) ≈ good coverage
+    learning_rate: float = 2e-4                # Standard for LoRA fine-tuning
+    weight_decay: float = 0.01                 # Light decay — LoRA params are small
+    warmup_steps: int = 100
     grad_clip_norm: float = 1.0
 
-    # Muon optimizer (for 2D weight matrices)
+    # Muon optimizer (for 2D LoRA weight matrices: lora_A, lora_B)
     muon_momentum: float = 0.95
-    muon_ns_steps: int = 5  # Newton-Schulz iterations
-    muon_lr_scale: float = 0.02  # Muon effective LR = lr * muon_lr_scale
+    muon_ns_steps: int = 5                     # Newton-Schulz iterations
+    muon_lr_scale: float = 0.02                # Muon effective LR = lr * muon_lr_scale
 
-    # AdamW optimizer (for embeddings, norms, router)
+    # AdamW optimizer (for non-2D trainable params: scalars, embedding LoRA)
     adam_betas: Tuple[float, float] = (0.9, 0.95)
     adam_eps: float = 1e-8
 
@@ -108,9 +80,9 @@ class TrainConfig:
 
     # Logging
     log_interval: int = 10
-    eval_interval: int = 1_000
-    checkpoint_interval: int = 5_000
-    wandb_project: str = "aero-deuce"
+    eval_interval: int = 500
+    checkpoint_interval: int = 500
+    wandb_project: str = "aero-deuce-qlora"
     wandb_run_name: str = ""
 
     # Checkpointing
@@ -123,25 +95,40 @@ class TrainConfig:
 
 @dataclass(frozen=True)
 class DataConfig:
-    """Data pipeline configuration."""
+    """Data pipeline configuration for SFT on instruction/chat data.
 
-    # Dataset
-    dataset_name: str = "roneneldan/TinyStories"
-    dataset_split: str = "train"
-    dataset_text_field: str = "text"
+    Mix of tool-calling/coding (60%) and conversation/reasoning (40%).
+    Each entry: (dataset_name, split, n_samples, category).
+    n_samples=0 means use full dataset.
+    """
 
-    # Tokenizer
-    tokenizer_name: str = "Qwen/Qwen3-1.7B"
-    eos_token_id: int = 151645  # Qwen3 <|endoftext|>
-
-    # Streaming and packing
-    streaming: bool = True
-    pack_sequences: bool = True
-    buffer_size: int = 10_000  # Streaming shuffle buffer
+    # Dataset mixture — loaded and merged by ChatSFTDataset
+    # All non-gated, publicly available on HuggingFace.
+    datasets: Tuple[Tuple[str, str, int, str], ...] = (
+        # Instruction following + coding (~60%)
+        ("tatsu-lab/alpaca", "train", 15_000, "instruction"),
+        ("databricks/databricks-dolly-15k", "train", 10_000, "instruction"),
+        # Conversation / reasoning (~40%)
+        ("HuggingFaceH4/no_robots", "train", 5_000, "conversation"),
+    )
 
     # Sequence configuration
-    max_seq_len: int = 4_096
+    max_seq_len: int = 2048
+
+    # Streaming shuffle buffer
+    buffer_size: int = 10_000
 
     # DataLoader
     num_workers: int = 0
     pin_memory: bool = True
+
+    # Train/eval split
+    test_split_ratio: float = 0.05             # 5% held out for eval (~1500 samples)
+
+    # Thinking mode configuration
+    enable_thinking: bool = False               # Default: non-thinking mode
+    thinking_system_prompt: str = (
+        "You are a helpful assistant. Before responding, think through your reasoning "
+        "step by step inside <thinkong>...</thinking> tags, then provide your final answer."
+    )
+    fast_system_prompt: str = "You are a helpful assistant."
