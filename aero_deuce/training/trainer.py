@@ -61,6 +61,35 @@ class Trainer:
         self.step = 0
         self.best_loss = float("inf")
 
+    def resume_from_checkpoint(self, checkpoint_dir: str) -> None:
+        """Resume training from a saved checkpoint.
+
+        Loads LoRA adapter weights, optimizer states, and step counter.
+        This allows training to continue after GPU preemption.
+        """
+        from peft import PeftModel
+
+        checkpoint_path = Path(checkpoint_dir)
+        state_file = checkpoint_path / "training_state.pt"
+
+        if not state_file.exists():
+            print(f"[Resume] No training_state.pt found in {checkpoint_dir}, starting fresh")
+            return
+
+        # Load adapter weights into the existing PEFT model
+        print(f"[Resume] Loading adapter weights from {checkpoint_dir}...")
+        self.model.load_adapter(str(checkpoint_path), adapter_name="default")
+
+        # Load training state
+        state = torch.load(state_file, map_location=self.device, weights_only=False)
+        self.step = state["step"]
+
+        # Restore optimizer states
+        for opt, opt_state in zip(self.optimizers, state["optimizers"]):
+            opt.load_state_dict(opt_state)
+
+        print(f"[Resume] Resumed from step {self.step}")
+
     def train(self) -> None:
         """Run the full training loop."""
         if self.dataloader is None:

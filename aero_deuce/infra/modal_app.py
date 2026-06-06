@@ -293,14 +293,16 @@ def smoke_train():
     secrets=[modal.Secret.from_name("aero-deuce-wandb")],
 )
 def train():
-    """Full ~3000 step QLoRA SFT training run on Gemma 4 12B IT.
+    """Full ~2000 step QLoRA SFT training run on Gemma 4 12B IT.
 
     ~30K instruction samples with masked loss on assistant tokens.
     Dual optimizer: Muon for LoRA A/B matrices, AdamW for non-2D params.
-    Checkpoints saved to Modal Volume every 500 steps.
+    Checkpoints saved to Modal Volume every 50 steps.
+    Auto-resumes from latest checkpoint if preempted.
     """
     import sys
     import os
+    import glob
     import torch
 
     # Reduce CUDA memory fragmentation — prevents OOM on long sequences
@@ -362,6 +364,13 @@ def train():
     train_loader, eval_loader = create_sft_dataloaders(data_config, tokenizer)
     print(f"[Train] Train batches: {len(train_loader)}, Eval batches: {len(eval_loader)}")
 
+    # Find latest checkpoint to resume from
+    latest_ckpt = None
+    ckpt_dirs = sorted(glob.glob("/checkpoints/step_*"))
+    if ckpt_dirs:
+        latest_ckpt = ckpt_dirs[-1]
+        print(f"[Train] Found checkpoint: {latest_ckpt}")
+
     # Trainer
     trainer = Trainer(
         model=model,
@@ -374,12 +383,16 @@ def train():
         eval_batches=20,
     )
 
-    print(f"\n[Train] Starting {train_config.max_steps} steps")
+    # Resume from checkpoint if found
+    if latest_ckpt:
+        trainer.resume_from_checkpoint(latest_ckpt)
+
+    print(f"\n[Train] {'Resuming' if latest_ckpt else 'Starting'} from step {trainer.step}/{train_config.max_steps}")
     print(f"[Train] Seq={train_config.max_seq_len}, Batch={train_config.batch_size}, "
           f"GradAccum={train_config.grad_accum_steps}")
     print(f"[Train] Tokens/step: {train_config.batch_size * train_config.max_seq_len:,}")
     print(f"[Train] LR: {train_config.learning_rate}, Warmup: {train_config.warmup_steps}")
-    print(f"[Train] Eval every {train_config.eval_interval} steps")
+    print(f"[Train] Checkpoint every {train_config.checkpoint_interval} steps, Eval every {train_config.eval_interval} steps")
     print()
 
     trainer.train()
