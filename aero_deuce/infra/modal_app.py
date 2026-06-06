@@ -64,7 +64,7 @@ image = (
 
 
 @app.function(
-    gpu="A10G",
+    gpu="A100",
     image=image,
     timeout=600,  # 10 min for validation
 )
@@ -190,7 +190,7 @@ def validate():
 
 
 @app.function(
-    gpu="A10G",
+    gpu="A100",
     image=image,
     timeout=1800,  # 30 min for smoke test
     volumes={"/checkpoints": volume},
@@ -286,7 +286,7 @@ def smoke_train():
 
 
 @app.function(
-    gpu="A10G",
+    gpu="A100",
     image=image,
     timeout=86400,  # 24 hours — safe margin
     volumes={"/checkpoints": volume},
@@ -404,7 +404,7 @@ def train():
 
 
 @app.function(
-    gpu="A10G",
+    gpu="A100",
     image=image,
     timeout=3600,  # 1 hour for export
     volumes={"/checkpoints": volume},
