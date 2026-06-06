@@ -366,7 +366,10 @@ def train():
 
     # Find latest checkpoint to resume from
     latest_ckpt = None
-    ckpt_dirs = sorted(glob.glob("/checkpoints/step_*"))
+    ckpt_dirs = sorted(
+        glob.glob("/checkpoints/step_*"),
+        key=lambda p: int(p.split("step_")[-1]),
+    )
     if ckpt_dirs:
         latest_ckpt = ckpt_dirs[-1]
         print(f"[Train] Found checkpoint: {latest_ckpt}")
