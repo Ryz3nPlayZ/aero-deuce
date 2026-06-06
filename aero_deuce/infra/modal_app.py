@@ -300,7 +300,11 @@ def train():
     Checkpoints saved to Modal Volume every 500 steps.
     """
     import sys
+    import os
     import torch
+
+    # Reduce CUDA memory fragmentation — prevents OOM on long sequences
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
     sys.path.insert(0, "/root/aero-deuce")
 

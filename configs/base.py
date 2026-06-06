@@ -22,7 +22,7 @@ class QLoRAConfig:
     base_model: str = "google/gemma-4-12b-it"
 
     # Sequence length (truncation/padding target)
-    max_seq_length: int = 2048
+    max_seq_length: int = 1024              # Reduced from 2048 — OOM protection
 
     # 4-bit quantization
     load_in_4bit: bool = True
@@ -54,16 +54,16 @@ class TrainConfig:
     """
 
     # Batch configuration
-    batch_size: int = 4                        # Global batch size (per optimizer step)
+    batch_size: int = 2                        # Reduced from 4 — OOM protection on 24GB GPU
     micro_batch_size: int = 1                  # Per-forward-pass (gradient accumulation)
 
-    max_seq_len: int = 2048
+    max_seq_len: int = 1024                  # Reduced from 2048 — OOM protection
 
     # Optimization
-    max_steps: int = 1_500       # Reduced: 30K samples / (4 batch × ~4 accum) ≈ good coverage
-    learning_rate: float = 2e-4                # Standard for LoRA fine-tuning
-    weight_decay: float = 0.01                 # Light decay — LoRA params are small
-    warmup_steps: int = 100
+    max_steps: int = 2_000                   # More steps to compensate for smaller batch
+    learning_rate: float = 2e-4
+    weight_decay: float = 0.01
+    warmup_steps: int = 50
     grad_clip_norm: float = 1.0
 
     # Muon optimizer (for 2D LoRA weight matrices: lora_A, lora_B)
@@ -113,7 +113,7 @@ class DataConfig:
     )
 
     # Sequence configuration
-    max_seq_len: int = 2048
+    max_seq_len: int = 1024
 
     # Streaming shuffle buffer
     buffer_size: int = 10_000

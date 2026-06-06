@@ -7,25 +7,21 @@ from configs.base import QLoRAConfig, TrainConfig, DataConfig
 
 
 def gemma4_12b_qlora_config() -> QLoRAConfig:
-    """Standard QLoRA config for Gemma 4 12B IT.
-
-    4-bit NF4 with double quantization, LoRA r=16/alpha=32 on all linear layers.
-    Peaks at ~7.5GB base model + ~50MB LoRA adapters = ~7.6GB model weight VRAM.
-    """
+    """Standard QLoRA config for Gemma 4 12B IT."""
     return QLoRAConfig()
 
 
 def qlora_train_config() -> TrainConfig:
     """Training config for full QLoRA SFT run on A10G (24GB VRAM).
 
-    ~1500 steps × 4 batch × 2048 seq with grad checkpointing.
-    At ~265 tok/s (observed), this takes ~8 hours (~$5 on spot).
+    seq_len=1024, batch_size=2 with grad checkpointing to avoid OOM.
+    ~2000 steps. At ~30s/step = ~17 hours (~$10 on spot).
     """
     return TrainConfig(
-        batch_size=4,
+        batch_size=2,
         micro_batch_size=1,
-        max_seq_len=2048,
-        max_steps=1_500,
+        max_seq_len=1024,
+        max_steps=2_000,
         learning_rate=2e-4,
         weight_decay=0.01,
         warmup_steps=50,
@@ -46,14 +42,11 @@ def qlora_train_config() -> TrainConfig:
 
 
 def qlora_smoke_train_config() -> TrainConfig:
-    """Quick 50-step smoke test to validate the full SFT pipeline.
-
-    With seq_len=2048 and grad checkpointing, ~30 sec/step → ~25 min.
-    """
+    """Quick 50-step smoke test."""
     return TrainConfig(
-        batch_size=4,
+        batch_size=2,
         micro_batch_size=1,
-        max_seq_len=2048,
+        max_seq_len=1024,
         max_steps=50,
         learning_rate=2e-4,
         weight_decay=0.01,
