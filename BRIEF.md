@@ -1,17 +1,17 @@
-# Operation Aero-Deuce — Project Brief
+# Aero-Deuce — Project Brief (Historical)
+
+> ⚠️ **Outdated.** This brief describes the original Mamba-3/MoE from-scratch pretraining approach, which was **abandoned** in favor of QLoRA post-training on Gemma 4 12B IT. See [README.md](README.md) for the current project.
 
 **Date:** June 5, 2026
-**Status:** Phase 1 smoke test validated. Full 10K-step training pending.
+**Status:** Superseded by QLoRA pivot (June 5, 2026)
 
 ---
 
-## 1. Mission
+## Original Mission (Superseded)
 
 Build **Aero-Deuce**: a hybrid Mamba-3 SSM + Grouped-Query Attention + DeepSeekMoE language model optimized for fast local inference on consumer hardware. The architecture mixes SSM layers (3:1 ratio) with sparse attention anchors and fine-grained mixture-of-experts to get the quality of a large dense model at a fraction of the compute per token.
 
-**Phase 1 (current):** Build a ~370M parameter smoke-test variant, train on TinyStories via Modal A10G, validate the loss converges. The model should be competitive with other models at the same parameter count.
-
-**Phase 2 (future):** Scale to the full 1.7B active / 8B total parameter architecture with multi-H100 cluster and DeepSpeed ZeRO-3.
+**This approach was abandoned** because training a competitive model from scratch at hobby scale proved too expensive and produced lower quality than post-training an existing strong base model. The project pivoted to QLoRA fine-tuning Gemma 4 12B IT — see [README.md](README.md) for details.
 
 ---
 
