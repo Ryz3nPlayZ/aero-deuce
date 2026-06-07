@@ -16,7 +16,7 @@
 
 Aero-Deuce is a fine-tuned variant of [Gemma 4 12B IT](https://huggingface.co/google/gemma-4-12b-it) post-trained via QLoRA on 30K instruction-following samples. It uses a dual-optimizer setup with the [Muon optimizer](https://arxiv.org/abs/2502.16982) (Newton-Schulz orthogonalization) for LoRA weight matrices and AdamW for remaining parameters.
 
-The result: a model that converges faster and achieves lower loss than standard AdamW-only QLoRA, trained for under $20 total compute cost.
+The result: a model that converges faster and achieves lower loss than standard AdamW-only QLoRA.
 
 ### Key details
 
@@ -30,7 +30,7 @@ The result: a model that converges faster and achieves lower loss than standard 
 | **Training steps** | 2,000 |
 | **Final train loss** | 0.57 (from 3.82) |
 | **Final val loss** | 1.04 |
-| **Compute cost** | ~$19 (Modal + Lightning AI) |
+| **Compute cost** | Modal + Lightning AI |
 
 ---
 
@@ -58,10 +58,10 @@ Step 2000:  0.57  █████
 | Throughput | ~117 tok/s, ~17.5s/step |
 
 **Infrastructure:**
-| Platform | GPU | Steps | Cost |
-|---|---|---|---|
-| Modal (spot) | A10G → A100 | 0–1000 | ~$11 |
-| Lightning AI | A100-80GB | 1000–2000 | ~$8 |
+| Platform | GPU | Steps |
+|---|---|---|
+| Modal (spot) | A10G → A100 | 0–1000 |
+| Lightning AI | A100-80GB | 1000–2000 |
 
 See [TRAINING_RESULTS.md](TRAINING_RESULTS.md) for the full report.
 
