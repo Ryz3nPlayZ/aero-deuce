@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/logo.png" width="120" alt="Aero-Deuce logo"/>
+
 # Aero-Deuce
 
 **Post-trained Gemma 4 12B IT with QLoRA + Muon optimizer**

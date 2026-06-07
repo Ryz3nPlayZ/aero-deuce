@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 585 585">
+  <defs>
+    <radialGradient id="aero-grad" cx="0.45" cy="0.40" r="0.85" fx="0.75" fy="0.30" gradientUnits="objectBoundingBox">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="25%" stop-color="#00FFE1"/>
+      <stop offset="65%" stop-color="#00BBFF"/>
+      <stop offset="100%" stop-color="#004466"/>
+    </radialGradient>
+    <radialGradient id="aero-glow" cx="0.5" cy="0.5" r="0.5" gradientUnits="objectBoundingBox">
+      <stop offset="0%" stop-color="#00FFE1" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#00FFE1" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <!-- Subtle glow behind the shape -->
+  <ellipse cx="292" cy="292" rx="260" ry="260" fill="url(#aero-glow)"/>
+  <!-- Main logo shape -->
+  <g transform="translate(20.55,47.30)">
+    <path d="M441.42,156.54 L441.43,147.44 Q444.05,151.99,441.42,156.54 L250.92,486.50 Q238.42,508.15,237.88,483.16 L233.47,278.80 Q233.36,273.58,230.75,269.06 L229.44,266.79 Q226.83,262.27,222.31,259.66 L46.52,158.17 Q24.87,145.67,49.87,145.36 L432.24,140.67 Q437.49,140.61,440.11,145.16 Z" fill="url(#aero-grad)" transform="rotate(-120 271.93 245.18)"/>
+  </g>
+</svg>
