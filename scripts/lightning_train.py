@@ -40,6 +40,11 @@ def main():
     train_config = qlora_train_config()
     data_config = qlora_data_config()
 
+    # Override checkpoint dir to local project path (not /checkpoints which is Modal-specific)
+    checkpoint_dir = os.path.join(PROJECT_ROOT, "checkpoints")
+    from dataclasses import replace
+    train_config = replace(train_config, checkpoint_dir=checkpoint_dir)
+
     device = torch.device("cuda")
     print(f"[Train] GPU: {torch.cuda.get_device_name(0)}")
     print(f"[Train] VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
