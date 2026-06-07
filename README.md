@@ -1,6 +1,6 @@
 <div align="center">
 
-# ✈️ Aero-Deuce
+# Aero-Deuce
 
 **Post-trained Gemma 4 12B IT with QLoRA + Muon optimizer**
 
